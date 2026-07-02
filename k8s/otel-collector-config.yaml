@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    extensions:
+      file_storage:
+        directory: /var/lib/otelcol/queue
+
+    receivers:
+      filelog:
+        include: [/var/log/pods/**/*.log]
+        start_at: beginning
+        operators:
+          - type: regex_parser
+            regex: '^(?P<time>[^ ]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]+) (?P<log>.*)$'
+          - type: json_parser
+            parse_from: attributes.log
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+
+    processors:
+      k8sattributes:
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.namespace.name
+            - k8s.deployment.name
+            - k8s.node.name
+
+    exporters:
+      clickhouse:
+        endpoint: tcp://clickhouse-svc.monitoring:9000
+        database: otel
+        ttl: 24h
+        sending_queue:
+          enabled: true
+          storage: file_storage
+
+    service:
+      extensions: [file_storage]
+      pipelines:
+        logs:
+          receivers: [filelog]
+          processors: [k8sattributes]
+          exporters: [clickhouse]
+        traces:
+          receivers: [otlp]
+          processors: [k8sattributes]
+          exporters: [clickhouse]
