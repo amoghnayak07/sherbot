@@ -153,11 +153,11 @@ curl -X POST http://localhost:8080/webhook `
 
 ## Phase 2 Completion Criteria
 
-- [ ] `docker-compose up -d` starts PostgreSQL successfully
-- [ ] All three tables exist in PostgreSQL
-- [ ] Orchestrator starts locally with `uvicorn agents.orchestrator:app --port 8080 --reload`
-- [ ] POST firing webhook → incident row inserted with `status=in_flight`
-- [ ] POST same webhook again → rejected, no duplicate row
-- [ ] POST resolved webhook → `fixed=TRUE` on matching incident
-- [ ] All activity logged as structured JSON to stdout
-- [ ] PostgreSQL writes retry on failure via Tenacity
+- [x] `docker-compose up -d` starts PostgreSQL successfully
+- [x] All three tables exist in PostgreSQL
+- [x] Orchestrator starts locally with `uvicorn agents.orchestrator:app --port 8080 --reload`
+- [x] POST firing webhook → incident row inserted with `status=in_flight`
+- [x] POST same webhook again → rejected, no duplicate row
+- [x] POST resolved webhook → `fixed=TRUE` on matching incident
+- [x] All activity logged as structured JSON to stdout
+- [x] PostgreSQL writes retry on failure via Tenacity
