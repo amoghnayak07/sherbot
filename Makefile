@@ -14,3 +14,12 @@ backend:
 
 teardown:
 	k3d cluster delete sherbot
+
+local-up:
+	docker-compose up -d
+
+local-down:
+	docker-compose down
+
+local-run-orchestrator:
+	cd agents && .venv\Scripts\Activate.ps1 && uvicorn orchestrator:app --port 8080 --reload
