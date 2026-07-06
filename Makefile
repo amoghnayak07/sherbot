@@ -23,3 +23,9 @@ local-down:
 
 local-run-orchestrator:
 	cd agents && .venv\Scripts\Activate.ps1 && uvicorn orchestrator:app --port 8080 --reload
+
+local-run-embeddings:
+	cd embeddings && .venv\Scripts\Activate.ps1 && uvicorn service:app --port 8090 --reload
+
+port-forward-clickhouse:
+	kubectl port-forward -n monitoring svc/clickhouse-svc 8123:8123

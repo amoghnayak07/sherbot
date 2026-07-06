@@ -12,8 +12,19 @@ data:
     receivers:
       filelog:
         include: [/var/log/pods/**/*.log]
+        include_file_path: true
         start_at: beginning
         operators:
+          - type: regex_parser
+            regex: '^/var/log/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[^/]+)/(?P<container_name>[^/]+)/'
+            parse_from: attributes["log.file.path"]
+            parse_to: attributes.k8s_path
+          - type: move
+            from: attributes.k8s_path.namespace
+            to: resource["k8s.namespace.name"]
+          - type: move
+            from: attributes.k8s_path.pod_name
+            to: resource["k8s.pod.name"]
           - type: regex_parser
             regex: '^(?P<time>[^ ]+) (?P<stream>stdout|stderr) (?P<logtag>[^ ]+) (?P<log>.*)$'
           - type: json_parser
@@ -25,6 +36,10 @@ data:
 
     processors:
       k8sattributes:
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.name
         extract:
           metadata:
             - k8s.pod.name
