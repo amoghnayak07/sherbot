@@ -1,8 +1,12 @@
 import json
 import logging
 import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import clickhouse_connect
+import httpx
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -10,6 +14,9 @@ from sqlalchemy.orm import sessionmaker
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 import config
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "embeddings"))
+from chunker import chunk  # noqa: E402
 
 
 class JSONFormatter(logging.Formatter):
@@ -116,6 +123,102 @@ async def mark_incident_resolved(alert: dict) -> None:
     )
 
 
+async def query_clickhouse_logs(pod: str, namespace: str, window_start: datetime, window_end: datetime) -> list[dict]:
+    client = await clickhouse_connect.get_async_client(
+        host=config.CLICKHOUSE_HOST, port=config.CLICKHOUSE_PORT, database=config.CLICKHOUSE_DATABASE
+    )
+    result = await client.query(
+        """
+        SELECT Timestamp, Body, TraceId, SpanId, ServiceName, SeverityNumber, LogAttributes, ResourceAttributes
+        FROM otel_logs
+        WHERE ResourceAttributes['k8s.pod.name'] = {pod:String}
+        AND ResourceAttributes['k8s.namespace.name'] = {namespace:String}
+        AND Timestamp >= {window_start:DateTime64} AND Timestamp <= {window_end:DateTime64}
+        """,
+        parameters={"pod": pod, "namespace": namespace, "window_start": window_start, "window_end": window_end},
+    )
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+async def query_clickhouse_traces(service: str, window_start: datetime, window_end: datetime) -> list[dict]:
+    client = await clickhouse_connect.get_async_client(
+        host=config.CLICKHOUSE_HOST, port=config.CLICKHOUSE_PORT, database=config.CLICKHOUSE_DATABASE
+    )
+    result = await client.query(
+        """
+        SELECT Timestamp, TraceId, SpanId, ParentSpanId, ServiceName, SpanName, Duration, SpanAttributes
+        FROM otel_traces
+        WHERE ServiceName = {service:String}
+        AND Timestamp >= {window_start:DateTime64} AND Timestamp <= {window_end:DateTime64}
+        """,
+        parameters={"service": service, "window_start": window_start, "window_end": window_end},
+    )
+    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+async def embed_chunks(chunks: list[dict], source: str) -> list[list[float]]:
+    if not chunks:
+        return []
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{config.EMBEDDINGS_URL}/embed",
+            json={"texts": [c["content"] for c in chunks], "source": source},
+        )
+        response.raise_for_status()
+        return response.json()["embeddings"]
+
+
+async def insert_embeddings(incident_id: UUID, source: str, chunks: list[dict], vectors: list[list[float]]) -> None:
+    for chunk_data, vector in zip(chunks, vectors):
+        await run_query(
+            """
+            INSERT INTO embeddings (embedding_id, incident_id, source, content, metadata, embedding)
+            VALUES (:embedding_id, :incident_id, :source, :content, CAST(:metadata AS JSONB), CAST(:embedding AS vector))
+            """,
+            {
+                "embedding_id": str(uuid4()),
+                "incident_id": str(incident_id),
+                "source": source,
+                "content": chunk_data["content"],
+                "metadata": json.dumps(chunk_data["metadata"]),
+                "embedding": "[" + ",".join(str(v) for v in vector) + "]",
+            },
+        )
+
+
+async def chunk_and_embed(incident_id: UUID, alert: dict) -> None:
+    labels = alert["labels"]
+    pod = labels["pod"]
+    namespace = labels["namespace"]
+    service = labels.get("service", pod)
+
+    alert_time = datetime.fromisoformat(alert["startsAt"].replace("Z", "+00:00"))
+    window_start = alert_time - timedelta(minutes=config.ALERT_WINDOW_MINUTES)
+
+    log_rows = await query_clickhouse_logs(pod, namespace, window_start, alert_time)
+    trace_rows = await query_clickhouse_traces(service, window_start, alert_time)
+
+    log_chunks = chunk(log_rows, "logs")
+    trace_chunks = chunk(trace_rows, "traces")
+
+    log_vectors = await embed_chunks(log_chunks, "logs")
+    trace_vectors = await embed_chunks(trace_chunks, "traces")
+
+    await insert_embeddings(incident_id, "logs", log_chunks, log_vectors)
+    await insert_embeddings(incident_id, "traces", trace_chunks, trace_vectors)
+
+    log.info(
+        "Pre-processing complete, ready for agents",
+        extra={
+            "extra_fields": {
+                "incident_id": str(incident_id),
+                "log_chunks": len(log_chunks),
+                "trace_chunks": len(trace_chunks),
+            }
+        },
+    )
+
+
 @app.post("/webhook")
 async def handle_webhook(payload: dict) -> dict:
     for alert in payload["alerts"]:
@@ -133,6 +236,7 @@ async def handle_webhook(payload: dict) -> dict:
                 continue
 
             await insert_incident(incident_id, alert)
+            await chunk_and_embed(incident_id, alert)
         except Exception as exc:
             log.error(
                 "Failed to process alert",
